@@ -31,9 +31,7 @@ jobs:
       - name: Package Image.gz
         run: |
           mkdir -p artifacts
-          # 复制 Image.gz 到 artifacts 目录
-          cp arch/arm64/boot/Image.gz artifacts/
-          # 重命名为带哈希的文件名
+          cp out/arch/arm64/boot/Image.gz artifacts/
           cd artifacts
           mv Image.gz Image-${GITHUB_SHA::8}.gz
 
