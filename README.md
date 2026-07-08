@@ -51,3 +51,9 @@ TALPAD的/proc/version记录的编译环境是llvm-r383902
 注意：这些脚本目前还处于开发阶段 原开发者执行都没执行过 就是个毛坯 你要lkm集成还是builtin都可以
 
 如果你需要sukisu/ksu，请自行修改defconfig
+
+# Other
+
+TALPAD-Kernel-Team将会使用ai+人工的方式扫描内核源码中的漏洞，致力使此内核更加安全，避免恶意程序损坏用户设备
+
+By TALPAD-BOOM Kevin233
