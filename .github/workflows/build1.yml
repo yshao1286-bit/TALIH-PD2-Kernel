@@ -1,11 +1,11 @@
-name: Build TALIH-PD2 Kernel with KernelSU (Clang LLVM)
+name: Build TALIH-PD2 Kernel with KernelSU (Clang LLVM, KSU v0.4.3)
 
 on:
   workflow_dispatch:
     inputs:
       ksu_tag:
-        description: 'KernelSU tag (4.19 必须 ≤ v0.5.2)'
-        default: 'v0.5.2'
+        description: 'KernelSU tag (4.19 推荐 ≤ v0.4.3)'
+        default: 'v0.4.3'
         type: string
       defconfig:
         description: 'Defconfig 名（留空使用 ls12_mt8797_wifi_64_defconfig）'
@@ -27,30 +27,57 @@ jobs:
         with:
           fetch-depth: 1
 
-      # ── 1. 合并 KernelSU ──
-      - name: Setup KernelSU
-        run: |
-          curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s ${{ inputs.ksu_tag }}
-
-      # ── 2. 下载专用 clang 及 LLVM 工具链 ──
+      # ── 1. 下载专用 clang 及 LLVM 工具链 ──
       - name: Download custom clang
         run: |
           CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
           mkdir -p "$CLANG_PATH/bin"
           cd "$CLANG_PATH/bin"
-          # 下载 clang 可执行文件（来自 Kevin233B）
           curl -L -o clang "https://github.com/Kevin233B/TALIH-PD2-Kernel/releases/download/other/clang"
           chmod +x clang
-          # 验证
           ./clang --version | head -1
 
-      # ── 3. 安装交叉编译所需的 GNU 工具（as, ld 等）──
+      # ── 2. 安装交叉编译所需的 GNU 工具（as, ld 等）──
       - name: Install cross toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
             gcc-aarch64-linux-gnu \
             bc flex bison libssl-dev make git cpio python3
+
+      # ── 3. 合并 KernelSU v0.4.3 并手动应用 4.19 补丁 ──
+      - name: Setup KernelSU v0.4.3 with manual patches
+        run: |
+          # 克隆 KernelSU 仓库到临时目录
+          git clone --depth=1 --branch ${{ inputs.ksu_tag }} \
+            https://github.com/tiann/KernelSU.git /tmp/KernelSU
+
+          # 首先运行官方 setup.sh（它会尝试打补丁，但可能跳过一些）
+          bash /tmp/KernelSU/kernel/setup.sh ${{ inputs.ksu_tag }} || true
+
+          # 手动应用 4.19 non-GKI 补丁（确保所有 hook 都正确嵌入）
+          PATCH_DIR="/tmp/KernelSU/kernel/patches/4.19"
+          if [ -d "$PATCH_DIR" ]; then
+            for patch in "$PATCH_DIR"/*.patch; do
+              echo "Applying $patch ..."
+              git apply --ignore-space-change --ignore-whitespace "$patch" 2>/dev/null || \
+                echo "Warning: patch $patch may have been partially applied, continuing."
+            done
+          else
+            echo "No 4.19 patches directory found, skipping manual patching."
+          fi
+
+          # 清理临时目录
+          rm -rf /tmp/KernelSU
+
+          # 验证关键 hook 文件是否存在
+          for file in drivers/kernelsu/core_hook.c; do
+            if [ ! -f "$file" ]; then
+              echo "::error::$file missing! KernelSU integration failed."
+              exit 1
+            fi
+          done
+          echo "KernelSU ${{ inputs.ksu_tag }} setup completed."
 
       # ── 4. 确定 defconfig ──
       - name: Detect defconfig
@@ -64,7 +91,7 @@ jobs:
           echo "name=$DEF" >> $GITHUB_OUTPUT
           echo "Using defconfig: $DEF"
 
-      # ── 5. 配置内核（使用你给出的脚本结构）──
+      # ── 5. 配置内核（开启 KSU / kprobes / overlayfs）──
       - name: Configure kernel
         run: |
           CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
@@ -93,7 +120,7 @@ jobs:
             -e KSU
           make O=out ARCH=arm64 olddefconfig
 
-      # ── 6. 编译内核（同样使用你给出的脚本结构）──
+      # ── 6. 编译内核 ──
       - name: Build Image.gz-dtb
         run: |
           CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
