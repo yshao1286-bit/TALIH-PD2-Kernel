@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu_tag:
-        description: 'KernelSU tag (4.19 推荐 v0.4.0 或留空用 main)'
+        description: 'KernelSU tag (4.19 推荐 v0.4.0，留空走 main)'
         default: 'v0.4.0'
         type: string
 
@@ -23,7 +23,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # ── 1. 下载专用 clang ──
+      # ── 1. 下载专用 clang（Kevin233B）──
       - name: Download custom clang
         run: |
           CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
@@ -41,41 +41,70 @@ jobs:
             gcc-aarch64-linux-gnu \
             bc flex bison libssl-dev make git cpio python3
 
-      # ── 3. 合并 KernelSU 并手动应用 4.19 补丁 ──
-      - name: Setup KernelSU
+      # ── 3. 手动集成 KernelSU（绕过 setup.sh 的 core_hook.c 问题）──
+      - name: Manual Integrate KernelSU
         run: |
           TAG="${{ inputs.ksu_tag }}"
           if [ -z "$TAG" ]; then
-            # 留空则拉 main 最新
             git clone --depth=1 https://github.com/tiann/KernelSU.git /tmp/KernelSU
           else
             git clone --depth=1 --branch "$TAG" \
               https://github.com/tiann/KernelSU.git /tmp/KernelSU
           fi
 
-          # 先跑官方 setup
-          bash /tmp/KernelSU/kernel/setup.sh "$TAG" || true
+          echo "KernelSU cloned: $(cd /tmp/KernelSU && git log --oneline -1)"
 
-          # 手动 git-am 4.19 non-GKI 补丁（解决之前 undefined symbol 问题）
+          # 创建目标目录
+          mkdir -p "$GITHUB_WORKSPACE/drivers/KernelSU"
+
+          # 拷贝核心文件（新版本核心逻辑在 ksu.c，不再有 core_hook.c）
+          cp /tmp/KernelSU/kernel/ksu.c "$GITHUB_WORKSPACE/drivers/KernelSU/" 2>/dev/null || true
+          # 兼容老版本：如果有 core_hook.c 也拷
+          [ -f /tmp/KernelSU/kernel/core_hook.c ] && \
+            cp /tmp/KernelSU/kernel/core_hook.c "$GITHUB_WORKSPACE/drivers/KernelSU/"
+          # 头文件
+          cp /tmp/KernelSU/kernel/include/kernelsu.h "$GITHUB_WORKSPACE/drivers/KernelSU/" 2>/dev/null || true
+          # selinux 目录
+          cp -r /tmp/KernelSU/kernel/selinux "$GITHUB_WORKSPACE/drivers/KernelSU/" 2>/dev/null || true
+          # 其他可能存在的源文件
+          for f in /tmp/KernelSU/kernel/*.c; do
+            [ -f "$f" ] && cp "$f" "$GITHUB_WORKSPACE/drivers/KernelSU/"
+          done
+          for h in /tmp/KernelSU/kernel/include/*.h; do
+            [ -f "$h" ] && cp "$h" "$GITHUB_WORKSPACE/drivers/KernelSU/"
+          done
+
+          # 改 drivers/Makefile，加入 KernelSU
+          if ! grep -q "obj-y += KernelSU/" "$GITHUB_WORKSPACE/drivers/Makefile"; then
+            echo "obj-y += KernelSU/" >> "$GITHUB_WORKSPACE/drivers/Makefile"
+          fi
+
+          # 验证关键文件存在
+          ls -lh "$GITHUB_WORKSPACE/drivers/KernelSU/"
+          if [ ! -f "$GITHUB_WORKSPACE/drivers/KernelSU/ksu.c" ] && \
+             [ ! -f "$GITHUB_WORKSPACE/drivers/KernelSU/core_hook.c" ]; then
+            echo "::error::KernelSU 核心 C 文件缺失！"
+            exit 1
+          fi
+          echo "KernelSU 手动集成完成"
+
+      # ── 4. 应用 4.19 non-GKI 补丁（解决 ksu_*_hook undefined symbol）──
+      - name: Apply 4.19 patches
+        run: |
           PATCH_DIR="/tmp/KernelSU/kernel/patches/4.19"
           if [ -d "$PATCH_DIR" ]; then
             echo "Applying 4.19 patches..."
             cd "$GITHUB_WORKSPACE"
             for p in "$PATCH_DIR"/*.patch; do
+              [ -f "$p" ] || continue
               echo "  -> $(basename "$p")"
-              git am --3way "$p" 2>/dev/null || \
-                echo "     (may be partially applied, skipping)"
+              git am --3way "$p" 2>/dev/null || echo "     (skip, may conflict)"
             done
+          else
+            echo "No 4.19 patch dir found, skip"
           fi
 
-          # 验证 core_hook 存在
-          if [ ! -f drivers/kernelsu/core_hook.c ]; then
-            echo "::error::drivers/kernelsu/core_hook.c missing!"
-            exit 1
-          fi
-          echo "KernelSU setup done."
-
-      # ── 4. 配置内核（固定 defconfig）──
+      # ── 5. 配置内核（锁 ls12_mt8797_wifi_64_defconfig）──
       - name: Configure kernel
         run: |
           CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
@@ -103,7 +132,7 @@ jobs:
             -e KSU
           make O=out ARCH=arm64 olddefconfig
 
-      # ── 5. 编译内核 ──
+      # ── 6. 编译内核 ──
       - name: Build Image.gz-dtb
         run: |
           CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
@@ -126,7 +155,7 @@ jobs:
             -j$(nproc) 2>&1 | tee build.log
         continue-on-error: true
 
-      # ── 6. 检查产物 ──
+      # ── 7. 检查产物 ──
       - name: Check build result
         run: |
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
@@ -137,7 +166,7 @@ jobs:
             tail -200 build.log
           fi
 
-      # ── 7. 打包 AnyKernel3 ──
+      # ── 8. 打包 AnyKernel3 ──
       - name: Package AnyKernel3
         if: always()
         run: |
@@ -152,7 +181,7 @@ jobs:
           zip -r ../$ZIP *
           echo "刷机包: $ZIP"
 
-      # ── 8. 上传产物 ──
+      # ── 9. 上传产物 ──
       - name: Upload Artifact
         if: always()
         uses: actions/upload-artifact@v4
