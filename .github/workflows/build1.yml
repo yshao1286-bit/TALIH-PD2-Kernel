@@ -1,4 +1,4 @@
-name: Build TALIH-PD2 Kernel with KernelSU (Ubuntu 22.04 Final)
+name: Build TALIH-PD2 Kernel with KernelSU (Final)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         default: 'v0.5.2'
         type: string
       defconfig:
-        description: 'Defconfig 名（不填则自动查找 mt8797 开头）'
+        description: 'Defconfig 文件名（留空自动查找 mt8797 开头）'
         default: ''
         type: string
 
@@ -32,7 +32,7 @@ jobs:
         run: |
           curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s ${{ inputs.ksu_tag }}
 
-      # ── 2. 安装 GCC 9 交叉编译器（Ubuntu 22.04 源）──
+      # ── 2. 安装 GCC 9 交叉编译器 ──
       - name: Install GCC 9 cross compiler
         run: |
           sudo apt-get update -qq
