@@ -1,4 +1,4 @@
-name: Build TALIH-PD2 Kernel with KernelSU (Final)
+name: Build TALIH-PD2 Kernel with KernelSU (Clang from Kevin233B)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         default: 'v0.5.2'
         type: string
       defconfig:
-        description: 'Defconfig 文件名（留空自动查找 mt8797 开头）'
+        description: 'Defconfig 名（留空自动查找 mt8797 开头）'
         default: ''
         type: string
 
@@ -32,15 +32,33 @@ jobs:
         run: |
           curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s ${{ inputs.ksu_tag }}
 
-      # ── 2. 安装 GCC 9 交叉编译器 ──
-      - name: Install GCC 9 cross compiler
+      # ── 2. 下载并安装专用 clang ──
+      - name: Setup custom clang
+        run: |
+          # 创建目标目录
+          CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
+          mkdir -p "$CLANG_PATH/bin"
+          
+          # 下载 clang 可执行文件（来自 Kevin233B 的 release）
+          curl -L -o "$CLANG_PATH/bin/clang" \
+            "https://github.com/Kevin233B/TALIH-PD2-Kernel/releases/download/other/clang"
+          chmod +x "$CLANG_PATH/bin/clang"
+          
+          # 将 clang 所在目录加入 PATH
+          echo "$CLANG_PATH/bin" >> $GITHUB_PATH
+          
+          # 验证版本
+          clang --version | head -1
+
+      # ── 3. 安装必要的交叉编译工具（GNU as/ld 仍需，LLVM_IAS=0）──
+      - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            gcc-9-aarch64-linux-gnu g++-9-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu \        # 提供 aarch64-linux-gnu-as, ld 等
             bc flex bison libssl-dev make git cpio python3
 
-      # ── 3. 确定 defconfig ──
+      # ── 4. 确定 defconfig ──
       - name: Detect defconfig
         id: def
         run: |
@@ -56,12 +74,14 @@ jobs:
           echo "name=$DEF" >> $GITHUB_OUTPUT
           echo "Using defconfig: $DEF"
 
-      # ── 4. 配置内核（开启 KSU / kprobes / overlayfs）──
+      # ── 5. 配置内核（开启 KSU / kprobes / overlayfs）──
       - name: Configure kernel
         run: |
           export ARCH=arm64 SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=aarch64-linux-gnu-gcc-9
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export LLVM_IAS=0                # 4.19 必须关闭内置汇编器
 
           make O=out ${{ steps.def.outputs.name }}
 
@@ -71,17 +91,19 @@ jobs:
             -e KSU
           make O=out ARCH=arm64 olddefconfig
 
-      # ── 5. 编译内核 ──
+      # ── 6. 编译内核 ──
       - name: Build Image.gz-dtb
         run: |
           export ARCH=arm64 SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=aarch64-linux-gnu-gcc-9
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export LLVM_IAS=0
 
           make O=out -j$(nproc) Image.gz-dtb 2>&1 | tee build.log
         continue-on-error: true
 
-      # ── 6. 检查编译产物 ──
+      # ── 7. 检查编译产物 ──
       - name: Check build result
         run: |
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
@@ -92,7 +114,7 @@ jobs:
             tail -200 build.log
           fi
 
-      # ── 7. 打包 AnyKernel3 ──
+      # ── 8. 打包 AnyKernel3 ──
       - name: Package AnyKernel3
         if: always()
         run: |
@@ -103,16 +125,16 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 -b master ak3
           cp out/arch/arm64/boot/Image.gz-dtb ak3/
           cd ak3
-          zip -r ../TALIH-PD2-KSU-${{ inputs.ksu_tag }}-final.zip *
+          zip -r ../TALIH-PD2-KSU-${{ inputs.ksu_tag }}-clang.zip *
           echo "AnyKernel3 刷机包已生成"
 
-      # ── 8. 上传编译产物 ──
+      # ── 9. 上传编译产物 ──
       - name: Upload Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: TALIH-PD2-KSU-${{ inputs.ksu_tag }}-final
+          name: TALIH-PD2-KSU-${{ inputs.ksu_tag }}-clang
           path: |
-            TALIH-PD2-KSU-*-final.zip
+            TALIH-PD2-KSU-*-clang.zip
             out/arch/arm64/boot/Image.gz-dtb
             build.log
