@@ -15,7 +15,7 @@ on:
 jobs:
   build:
     # 【关键修改】强制使用 Ubuntu 20.04，解决 binutils 太新导致的内核报错
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     steps:
       # ── 1. 拉取源码 ──
