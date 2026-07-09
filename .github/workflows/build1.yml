@@ -1,88 +1,122 @@
-name: Build TALIH-PD2 Kernel with KernelSU (Custom Clang)
+name: Build TALIH-PD2 Kernel with KernelSU (Clang LLVM)
 
 on:
   workflow_dispatch:
     inputs:
       ksu_tag:
-        description: 'KernelSU Tag (e.g., v0.5.2)'
-        required: true
+        description: 'KernelSU tag (4.19 必须 ≤ v0.5.2)'
         default: 'v0.5.2'
+        type: string
       defconfig:
-        description: 'Defconfig Name (e.g., ls12_mt8797_wifi_64_defconfig)'
-        required: false
-        default: ''
+        description: 'Defconfig 名（留空使用 ls12_mt8797_wifi_64_defconfig）'
+        default: 'ls12_mt8797_wifi_64_defconfig'
+        type: string
+
+env:
+  TZ: Asia/Shanghai
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
 
     steps:
-      # ── 1. 检出源码 ──
-      - name: Checkout source
+      - name: Checkout kernel source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      # ── 2. 设置 Clang 环境 (直接下载你指定的 Clang) ──
-      - name: Setup custom clang
+      # ── 1. 合并 KernelSU ──
+      - name: Setup KernelSU
         run: |
-          mkdir -p $PWD/prebuilts/clang/host/linux-x86/clang-r383902/bin
-          cd $PWD/prebuilts/clang/host/linux-x86/clang-r383902/bin
-          
-          # 下载你提供的 Clang
-          echo "正在下载 Clang..."
+          curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s ${{ inputs.ksu_tag }}
+
+      # ── 2. 下载专用 clang 及 LLVM 工具链 ──
+      - name: Download custom clang
+        run: |
+          CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
+          mkdir -p "$CLANG_PATH/bin"
+          cd "$CLANG_PATH/bin"
+          # 下载 clang 可执行文件（来自 Kevin233B）
           curl -L -o clang "https://github.com/Kevin233B/TALIH-PD2-Kernel/releases/download/other/clang"
           chmod +x clang
-          
-          # 验证是否下载成功
-          ./clang --version
+          # 验证
+          ./clang --version | head -1
 
-      # ── 3. 检测 defconfig ──
+      # ── 3. 安装交叉编译所需的 GNU 工具（as, ld 等）──
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            bc flex bison libssl-dev make git cpio python3
+
+      # ── 4. 确定 defconfig ──
       - name: Detect defconfig
         id: def
         run: |
           if [ -n "${{ inputs.defconfig }}" ]; then
             DEF="${{ inputs.defconfig }}"
           else
-            DEF=$(ls arch/arm64/configs/ | grep -im1 'mt8797.*_defconfig' | head -1)
-            if [ -z "$DEF" ]; then
-              echo "::error::找不到 mt8797 defconfig，请手动填写"
-              exit 1
-            fi
+            DEF="ls12_mt8797_wifi_64_defconfig"
           fi
           echo "name=$DEF" >> $GITHUB_OUTPUT
           echo "Using defconfig: $DEF"
 
-      # ── 4. 配置内核 (使用 Clang) ──
+      # ── 5. 配置内核（使用你给出的脚本结构）──
       - name: Configure kernel
         run: |
-          export ARCH=arm64 SUBARCH=arm64
+          CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
+          CLANG_BIN="$CLANG_PATH/bin"
+          export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=clang
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902/bin:$PATH"
 
-          # 4.19 内核建议加上 -fgnu89-inline 防止内联报错
-          make O=out ${{ steps.def.outputs.name }} KCFLAGS="-fgnu89-inline"
+          make O=out ARCH=arm64 \
+            CC=$CLANG_BIN/clang \
+            LD=$CLANG_BIN/ld.lld \
+            AR=$CLANG_BIN/llvm-ar \
+            NM=$CLANG_BIN/llvm-nm \
+            OBJCOPY=$CLANG_BIN/llvm-objcopy \
+            OBJDUMP=$CLANG_BIN/llvm-objdump \
+            READELF=$CLANG_BIN/llvm-readelf \
+            OBJSIZE=$CLANG_BIN/llvm-size \
+            STRIP=$CLANG_BIN/llvm-strip \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 \
+            ${{ steps.def.outputs.name }}
 
+          # 开启 KSU / kprobes / overlayfs
           ./scripts/config --file out/.config \
             -e KPROBES -e HAVE_KPROBES \
             -e OVERLAY_FS \
             -e KSU
           make O=out ARCH=arm64 olddefconfig
 
-      # ── 5. 编译内核 ──
+      # ── 6. 编译内核（同样使用你给出的脚本结构）──
       - name: Build Image.gz-dtb
         run: |
-          export ARCH=arm64 SUBARCH=arm64
+          CLANG_PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902"
+          CLANG_BIN="$CLANG_PATH/bin"
+          export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=clang
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export PATH="$PWD/prebuilts/clang/host/linux-x86/clang-r383902/bin:$PATH"
-          export KCFLAGS="-fgnu89-inline"
 
-          make O=out -j$(nproc) Image.gz-dtb 2>&1 | tee build.log
+          make O=out ARCH=arm64 \
+            CC=$CLANG_BIN/clang \
+            LD=$CLANG_BIN/ld.lld \
+            AR=$CLANG_BIN/llvm-ar \
+            NM=$CLANG_BIN/llvm-nm \
+            OBJCOPY=$CLANG_BIN/llvm-objcopy \
+            OBJDUMP=$CLANG_BIN/llvm-objdump \
+            READELF=$CLANG_BIN/llvm-readelf \
+            OBJSIZE=$CLANG_BIN/llvm-size \
+            STRIP=$CLANG_BIN/llvm-strip \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 \
+            -j$(nproc) 2>&1 | tee build.log
         continue-on-error: true
 
-      # ── 6. 检查编译产物 ──
+      # ── 7. 检查编译产物 ──
       - name: Check build result
         run: |
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
@@ -93,7 +127,7 @@ jobs:
             tail -200 build.log
           fi
 
-      # ── 7. 打包 AnyKernel3 ──
+      # ── 8. 打包 AnyKernel3 ──
       - name: Package AnyKernel3
         if: always()
         run: |
@@ -107,7 +141,7 @@ jobs:
           zip -r ../TALIH-PD2-KSU-${{ inputs.ksu_tag }}-clang.zip *
           echo "AnyKernel3 刷机包已生成"
 
-      # ── 8. 上传编译产物 ──
+      # ── 9. 上传编译产物 ──
       - name: Upload Artifact
         if: always()
         uses: actions/upload-artifact@v4
